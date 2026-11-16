@@ -1,0 +1,18 @@
+{
+  "_readme": [
+    "这是密钥模板。用法：复制成 config/keys.json 再填入真实 key（该文件已被 .gitignore 忽略，不会入库）。",
+    "留空 = 该供应商不可用，对应功能会优雅降级（例如没有 qwen/mimo key 就没有朗读按钮），不会报错崩溃。",
+    "GET /api/keys/status 只会回答「哪些已配置」，永远不会回显 key 本身。",
+    "环境变量的优先级高于本文件，见 README「密钥配置」一节。"
+  ],
+  "qwen": { "api": { "key": "" } },
+  "mimo": { "api": { "key": "" } },
+  "deepseek": { "api": { "key": "" } },
+  "gpt": { "api": { "key": "" } },
+  "grok": { "api": { "key": "" } },
+  "gemini": { "api": { "key": "" } },
+  "genimi": { "api": { "key": "" } },
+  "doubao": { "api": { "key": "" } },
+  "qwentokenplan": { "api": { "key": "" } },
+  "mimotokenplan": { "api": { "key": "" } }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "sanjian-wordgame",
+  "version": "1.0.0",
+  "description": "三玖关 / 三玖课文关 自建私服 —— 零依赖 Node 后端 + 免构建网页 + 公开 API，手机 App 可直接连",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "vocabulary",
+    "recitation",
+    "self-hosted",
+    "zero-dependency",
+    "api"
+  ],
+  "license": "MIT",
+  "private": false
+}
