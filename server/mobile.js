@@ -138,7 +138,7 @@ export function registerMobile(router) {
     const id = requireIdentity(ctx);
     guard(ctx, id, 120, 'catalog');
     const done = S.loadPlayer(id.pid).done;
-    const out = { ok: true, deviceId: id.deviceId, sanj: null, text: null, caps: {} };
+    const out = { ok: true, deviceId: id.deviceId, sanj: null, text: null, history: {}, caps: {} };
     for (const kind of ['word', 'text']) {
       const lv = S.loadCurrent(kind);
       const key = kind === 'word' ? 'sanj' : 'text';
@@ -152,9 +152,19 @@ export function registerMobile(router) {
           updatedAt: new Date(lv.mtime).toISOString(),
         }
         : null;
+      // 历史关列表：App 可以直接列出来让用户选着复习
+      out.history[key] = S.listHistory(kind).map((x) => ({
+        num: x.num,
+        name: x.name,
+        count: x.count,
+        groups: Math.ceil(x.count / GROUP_SIZE),
+        updatedAt: x.updatedAt ? new Date(x.updatedAt).toISOString() : null,
+        saved: false,
+      }));
     }
     out.caps = {
       sanj: !!out.sanj, text: !!out.text,
+      history: (out.history.sanj.length + out.history.text.length) > 0,
       tts: T.available(), export: true, upload: true,
     };
     sendJson(ctx.res, 200, out);
@@ -168,15 +178,24 @@ export function registerMobile(router) {
     router.get(PREFIX + '/level', (ctx) => {
       const id = requireIdentity(ctx);
       guard(ctx, id, 120, 'level');
-      const lv = S.loadCurrent(kind);
-      if (!lv) throw notFound('<no-level>', '这台私服还没有上传' + (kind === 'text' ? '课文' : '关卡'));
+      // scope=history 时按 num 取历史关；否则取现役关
+      const history = ctx.query.get('scope') === 'history';
+      const lv = history ? S.loadLevel(kind, Number(ctx.query.get('num'))) : S.loadCurrent(kind);
+      if (!lv) {
+        throw notFound(
+          history ? '<no-history-level>' : '<no-level>',
+          history
+            ? `没有 ${ctx.query.get('num') || '?'} 这个历史` + (kind === 'text' ? '课文' : '关卡')
+            : '这台私服还没有上传' + (kind === 'text' ? '课文' : '关卡'),
+        );
+      }
 
       const fmt = String(ctx.query.get('format') || 'json');
       const txt = kind === 'text' ? S.formatText(lv.items) : S.formatWords(lv.items);
       const hash = hashOf(txt);
 
       if (String(ctx.query.get('hash') || '') === hash) {
-        sendJson(ctx.res, 200, { ok: true, unchanged: true, hash });
+        sendJson(ctx.res, 200, { ok: true, unchanged: true, hash, num: lv.num });
         return;
       }
 
@@ -185,6 +204,7 @@ export function registerMobile(router) {
           'X-WG-Hash': hash,
           'X-WG-Count': String(lv.items.length),
           'X-WG-Num': String(lv.num),
+          'X-WG-Saved': history ? '0' : '1',
           'Cache-Control': 'no-store',
         });
         return;
@@ -192,12 +212,14 @@ export function registerMobile(router) {
 
       sendJson(ctx.res, 200, {
         ok: true,
-        scope: NAME,
+        scope: history ? 'history' : NAME,
         num: lv.num,
         name: lv.name,
         count: lv.items.length,
         hash,
         groupSize: GROUP_SIZE,
+        // 历史关不存档：客户端不要拿它去合并本地进度
+        saved: !history,
         [kind === 'text' ? 'sentences' : 'words']: payloadOf(kind, lv.items),
       });
     });
@@ -208,7 +230,7 @@ export function registerMobile(router) {
     router.get(p, (ctx) => {
       const id = requireIdentity(ctx);
       guard(ctx, id, 20, 'export');
-      const out = { ok: true, exportedAt: new Date().toISOString(), sanj: null, text: null };
+      const out = { ok: true, exportedAt: new Date().toISOString(), sanj: null, text: null, history: {} };
       for (const kind of ['word', 'text']) {
         const lv = S.loadCurrent(kind);
         const key = kind === 'word' ? 'sanj' : 'text';
@@ -221,6 +243,20 @@ export function registerMobile(router) {
             [kind === 'text' ? 'sentences' : 'words']: payloadOf(kind, lv.items),
           }
           : null;
+        // 历史关默认一并导出（离线包里想复习旧关就不用再发一次请求）
+        out.history[key] = S.listHistory(kind).map((x) => {
+          const hlv = S.loadLevel(kind, x.num);
+          return hlv
+            ? {
+              num: hlv.num,
+              name: hlv.name,
+              count: hlv.items.length,
+              hash: hashOf(kind === 'text' ? S.formatText(hlv.items) : S.formatWords(hlv.items)),
+              saved: false,
+              [kind === 'text' ? 'sentences' : 'words']: payloadOf(kind, hlv.items),
+            }
+            : null;
+        }).filter(Boolean);
       }
       sendJson(ctx.res, 200, out);
     });

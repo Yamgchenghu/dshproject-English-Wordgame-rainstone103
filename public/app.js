@@ -30,6 +30,7 @@
     kind: 'word',
     info: null,          // 当前 kind 的 info
     infoAll: null,       // 两个 kind 的 info
+    history: [],         // 当前 kind 的历史关列表
     keys: null,
     play: null,
     studyAt: null,
@@ -215,7 +216,54 @@
       </div>
 
       ${viewLevelTable()}
+      ${viewHistory()}
     `;
+  }
+
+  /* ------------------------------ 历史关 ------------------------------ */
+  /**
+   * 历史关 = 以前上传过、后来被新关顶替的那些。
+   * 服务端只把"编号最大的那个"当现役关，其余天然就是历史关：
+   * 上传时用的文件名是关号，旧文件一直躺在盘上。
+   */
+  function viewHistory() {
+    const k = KINDS[state.kind];
+    if (!state.history.length) {
+      return `
+        <div class="card">
+          <div class="row between">
+            <h2 style="font-size:15px">历史关</h2>
+            <span class="small muted">暂无</span>
+          </div>
+          <p class="tiny muted" style="margin-top:8px">
+            上传新${k.unit === '句' ? '课文' : '关卡'}时如果用了新的关号，旧的就会自动进这里。
+          </p>
+        </div>`;
+    }
+    return `
+      <div class="card">
+        <div class="row between">
+          <h2 style="font-size:15px">历史关（${state.history.length}）</h2>
+          <span class="tiny muted">复习模式 · 不记进度</span>
+        </div>
+        <table class="list" style="margin-top:10px">
+          <tr><th>关号</th><th>${k.unit}数</th><th>组</th><th>更新时间</th><th></th></tr>
+          ${state.history.map((h) => `
+            <tr>
+              <td class="mono">${h.num}</td>
+              <td>${h.count}</td>
+              <td>${h.groups}</td>
+              <td class="tiny muted">${esc((h.updatedAt || '').slice(0, 10))}</td>
+              <td style="text-align:right">
+                <button class="btn-sm" data-act="start-history" data-num="${h.num}">复习</button>
+                <button class="btn-sm" data-act="study-history" data-num="${h.num}">学习</button>
+              </td>
+            </tr>`).join('')}
+        </table>
+        <p class="tiny muted" style="margin-top:10px">
+          历史关会把全部${k.unit}都过一遍，不跳过、不写进度，所以也不发整关奖励。
+        </p>
+      </div>`;
   }
 
   function viewLevelTable() {
@@ -307,7 +355,9 @@
 
     const banner = p.requiz
       ? '<div class="card" style="padding:10px 14px;border-color:#4a3a12;background:#2a2313"><span class="small">本篇有题错了不止一次，现在是补考这一遍（不计分、不改完成度）</span></div>'
-      : '';
+      : p.history
+        ? `<div class="card" style="padding:10px 14px;border-color:#4a3a12;background:#2a2313"><span class="small">历史关 ${esc(p.historyNum)} · 复习模式（全部${esc(k.unit)}都过一遍，不记进度）</span></div>`
+        : '';
 
     return banner + `
       <div class="card">
@@ -363,17 +413,25 @@
   function viewLevelSettle() {
     const r = state.levelSettle;
     const k = KINDS[state.play.kind];
+    const isHistory = !!state.play.history;
     return `
       <div class="card">
         <h2>整篇结算</h2>
+        ${isHistory
+          ? `<div class="card" style="margin:12px 0;padding:10px 14px;border-color:#4a3a12;background:#2a2313">
+               <span class="small">${esc(r.note || '历史关是复习模式：不记录进度，也不发整关奖励')}</span>
+             </div>`
+          : ''}
         <div class="settle-row" style="margin-top:12px"><span>全部计入完成</span><b>${r.allCompleted ? '<span class="badge ok">是</span>' : '<span class="badge bad">否（整篇奖励不发）</span>'}</b></div>
         <div class="settle-row"><span>整篇奖励</span><b>${r.bigReward} 积分</b></div>
-        <div class="settle-row"><span>完成进度</span><b>${r.completedUnits} / ${r.totalUnits} ${k.unit}</b></div>
+        <div class="settle-row"><span>${isHistory ? '本次做过' : '完成进度'}</span><b>${r.completedUnits} / ${r.totalUnits} ${k.unit}</b></div>
         <div class="row" style="margin-top:16px">
           <button class="btn-primary" data-act="close-settle">返回列表</button>
         </div>
         <p class="tiny muted" style="margin-top:12px">
-          整篇奖励只在"全部${k.unit}都计入完成"时发放：每${k.unit} ${r.bigReward ? (r.bigReward / Math.max(1, r.totalUnits)) : (state.play.kind === 'text' ? 0.5 : 0.1)} 积分 × ${r.totalUnits}。
+          ${isHistory
+            ? '复习历史关不会改动现役关的完成记录。'
+            : `整篇奖励只在"全部${k.unit}都计入完成"时发放：每${k.unit} ${r.totalUnits ? (r.bigReward / r.totalUnits || (state.play.kind === 'text' ? 0.5 : 0.1)) : (state.play.kind === 'text' ? 0.5 : 0.1)} 积分 × ${r.totalUnits}。`}
         </p>
       </div>`;
   }
@@ -484,15 +542,28 @@ GET {baseUrl}/api/wordgame/text/m/level</pre>
       state.info = null;
       state.err = e.message;
     }
+    // 历史关单独一个接口，失败不影响主流程
+    try {
+      const h = await api(k.path + '/history');
+      state.history = h.levels || [];
+    } catch {
+      state.history = [];
+    }
   }
 
-  async function startPlay(study) {
+  async function startPlay(study, opts) {
+    const o = opts || {};
     const kind = state.kind;
     const k = KINDS[kind];
     state.busy = true;
     state.err = '';
     try {
-      const d = await api(k.path + '/level' + (study ? '?study=1' : ''));
+      const q = [];
+      if (o.history) {
+        q.push('mode=history', 'num=' + encodeURIComponent(o.num));
+      }
+      if (study) q.push('study=1');
+      const d = await api(k.path + '/level' + (q.length ? '?' + q.join('&') : ''));
       const queue = [];
       for (const g of d.groups || []) {
         for (const it of g.items || []) queue.push({ ...it, id: it[k.idKey], groupIndex: g.index });
@@ -501,7 +572,9 @@ GET {baseUrl}/api/wordgame/text/m/level</pre>
 
       state.play = {
         kind, sessionId: d.sessionId, queue, qi: 0,
-        study: !!study, requiz: false, scoreTotal: 0,
+        study: !!study, requiz: false, history: !!o.history,
+        historyNum: o.history ? o.num : null,
+        scoreTotal: 0,
         levelNum: d.levelNum, totalUnits: d.totalUnits,
         wrong: new Map(),
       };
@@ -830,6 +903,8 @@ GET {baseUrl}/api/wordgame/text/m/level</pre>
     const act = btn.dataset.act;
 
     if (act === 'start') { await startPlay(btn.dataset.study === '1'); return; }
+    if (act === 'start-history') { await startPlay(false, { history: true, num: Number(btn.dataset.num) }); return; }
+    if (act === 'study-history') { await startPlay(true, { history: true, num: Number(btn.dataset.num) }); return; }
     if (act === 'study-next') { studyNext(); return; }
     if (act === 'skip-study') { skipStudy(); return; }
     if (act === 'submit') { await submitAnswer(); return; }

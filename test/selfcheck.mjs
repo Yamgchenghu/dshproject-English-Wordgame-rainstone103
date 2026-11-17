@@ -215,10 +215,15 @@ console.log('\n[4] 手机端接口');
 /* ============================ 上传 ============================ */
 console.log('\n[5] 上传（本机免口令）');
 {
+  /*
+   * 不写死关号：上传不指定 num 时服务端会取"当前最大号 + 1"，
+   * 这样这一关必然成为现役关。（写死关号的话，一旦盘上已经有更大的号，
+   * 上传的那关就只会变成历史关，后面的"回读现役关"断言自然对不上 ——
+   * 这个坑真实踩过。）
+   */
   const r = await j('/api/wordgame/text/upload', {
     method: 'POST',
     body: {
-      num: 900001,
       text: 'The morning train was late again. I walked to the office.\n早班火车又晚点了。我走路去了办公室。',
     },
   });
@@ -227,6 +232,7 @@ console.log('\n[5] 上传（本机免口令）');
   ok('自动配对译文', (r.body.preview[0].zh || '').includes('早班火车'), JSON.stringify(r.body.preview[0]));
 
   const back = await j('/api/wordgame/text/sentences');
+  ok('回读的就是刚上传的那关', back.body.num === r.body.num, `num=${back.body.num}`);
   ok('回读到第 2 句译文', (back.body.items[1] || {}).zh === '我走路去了办公室。', JSON.stringify((back.body.items[1] || {}).zh));
 
   const bad = await j('/api/wordgame/text/upload', { method: 'POST', body: { text: '   ' } });

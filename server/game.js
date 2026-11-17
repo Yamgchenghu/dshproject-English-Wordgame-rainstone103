@@ -150,6 +150,16 @@ export function registerGame(router, kind) {
     return groups;
   }
 
+  /** 历史关：全部题打乱后按 10 题切组，不借题、不跳过 */
+  function chunkAll(items) {
+    const src = shuffled(items);
+    const groups = [];
+    for (let i = 0; i < src.length; i += GROUP_SIZE) {
+      groups.push(src.slice(i, i + GROUP_SIZE).map((w) => ({ ...w, borrowed: false })));
+    }
+    return groups;
+  }
+
   function groupPayload(items, index, withEn) {
     const rank = withEn ? studyRanks(items.length) : null;
     return {
@@ -197,6 +207,8 @@ export function registerGame(router, kind) {
         tts: ttsAvailable(),
         llm: { available: llmAny() },
         upload: true,
+        // 历史关：除了现役关以外还有几篇可复习
+        history: S.listHistory(kind).length,
       },
       rules: {
         groupSize: GROUP_SIZE, passRatio: RULES.PASS_RATIO,
@@ -208,18 +220,44 @@ export function registerGame(router, kind) {
   /* ------------------------------ 开始 ------------------------------ */
   router.get(PREFIX + '/level', (ctx) => {
     const study = ctx.query.get('study') === '1' || ctx.query.get('study') === 'true';
+    const history = ctx.query.get('mode') === 'history';
     const pid = playerId(ctx);
-    const player = S.loadPlayer(pid);
-    const lv = currentLevel();
 
-    // 换了关就清空这份进度（与线上版一致：换关后从头开始）
-    let done = player.done;
-    if (player.num !== lv.num) {
-      done = [];
-      if (pid) S.savePlayer(pid, { done: [], num: lv.num });
+    /*
+     * 历史关：任意一个旧关号，**全部题都参与、不跳过已完成的题、不读也不写进度**。
+     *
+     * 【为什么历史关完全不碰进度】
+     *   它是"回头复习"，不是主线。若它也读写那份完成记录，复习一遍就会把
+     *   现役关的进度搅乱（现役关的完成度是按题目 id 存的，跨关会串）。
+     *   所以历史关的完成度只活在**这一次会话的内存里**，退出即散。
+     */
+    let lv;
+    if (history) {
+      const num = Number(ctx.query.get('num'));
+      lv = S.loadLevel(kind, num);
+      if (!lv) throw notFound('<no-history-level>', `没有 ${num || '?'} 这个历史关`);
+    } else {
+      lv = currentLevel();
     }
 
-    const groups = mkItems(lv, done);
+    let done = [];
+    if (history) {
+      done = [];                       // 不跳过任何题
+    } else {
+      const player = S.loadPlayer(pid);
+      done = player.done;
+      // 换了关就清空这份进度（与线上版一致：换关后从头开始）
+      if (player.num !== lv.num) {
+        done = [];
+        if (pid) S.savePlayer(pid, { done: [], num: lv.num });
+      }
+    }
+
+    // 历史关不借题（借题是"未完成的不足 10 题时用已完成的补"，历史关没有已完成的概念）
+    const groups = history
+      ? chunkAll(lv.items)
+      : mkItems(lv, done);
+
     if (!groups.length) {
       // 全部做完了：仍然给一整组（全部按 borrowed 处理），让用户能重刷而不卡死
       const all = shuffled(lv.items).slice(0, GROUP_SIZE).map((w) => ({ ...w, borrowed: true }));
@@ -227,22 +265,26 @@ export function registerGame(router, kind) {
     }
 
     const sessionId = newSession({
-      kind, num: lv.num, pid,
+      kind, num: lv.num, pid, history,
       items: groups.flatMap((g, gi) => g.map((w) => ({ ...w, gi }))),
       answers: new Map(),
       wrong: new Map(),
+      // 历史关的"本次完成"只记在会话里
+      doneSet: new Set(),
       study,
     });
 
     sendJson(ctx.res, 200, {
       ok: true,
       sessionId,
-      mode: 'sanj',
+      mode: history ? 'history' : 'sanj',
       levelNum: lv.num,
       levelName: lv.name,
       totalUnits: lv.items.length,
-      completedUnits: done.length,
+      completedUnits: history ? 0 : done.length,
       groupSize: GROUP_SIZE,
+      // 历史关没有存档，前端据此隐藏"已完成"之类会误导的数字
+      saved: !history,
       groups: groups.map((g, i) => groupPayload(g, i, study)),
     });
   });
@@ -301,21 +343,28 @@ export function registerGame(router, kind) {
     const answers = items.map((w) => ({ [ID]: S.idOf(w.en), correctAt: s.answers.get(S.idOf(w.en)) || 0 }));
     const r = computeGroup({ items: items.map((w) => ({ [ID]: S.idOf(w.en), borrowed: !!w.borrowed })), answers });
 
-    // 达标才把"第一次就答对"的记入完成（借来的题不计）
-    if (r.passed && s.pid) {
-      const p = S.loadPlayer(s.pid);
-      const set = new Set(p.done);
-      for (const id of r.firstTry) set.add(id);
-      S.savePlayer(s.pid, { done: [...set], num: s.num });
+    /*
+     * 达标才把"第一次就答对"的记入完成（借来的题不计）。
+     * 历史关只写进**本次会话**，绝不落盘 —— 复习一遍不该改动主线进度。
+     */
+    if (r.passed) {
+      if (s.history) {
+        for (const id of r.firstTry) s.doneSet.add(id);
+      } else if (s.pid) {
+        const p = S.loadPlayer(s.pid);
+        const set = new Set(p.done);
+        for (const id of r.firstTry) set.add(id);
+        S.savePlayer(s.pid, { done: [...set], num: s.num });
+      }
     }
 
-    const total = s.items.length;
     const nextGi = gi + 1;
     sendJson(ctx.res, 200, {
       ok: true,
       score: r.score,
       fullMark: r.fullMark,
       passed: r.passed,
+      saved: !s.history,
       [`firstTry${isText ? 'Sentences' : 'Words'}`]: r.firstTry,
       [`secondTry${isText ? 'Sentences' : 'Words'}`]: r.secondTry,
       points: r.points.total,
@@ -326,17 +375,29 @@ export function registerGame(router, kind) {
   /* ---------------------------- 整关结算 ---------------------------- */
   router.post(PREFIX + '/level/finish', jsonBody, (ctx) => {
     const s = getSession((ctx.body || {}).sessionId);
-    const lv = currentLevel();
-    const p = s.pid ? S.loadPlayer(s.pid) : { done: [] };
-    const done = new Set(p.done);
-    const completed = lv.items.filter((w) => done.has(S.idOf(w.en))).length;
+    const lv = s.history ? S.loadLevel(kind, s.num) : currentLevel();
+    if (!lv) throw notFound('<no-level>', '这一' + UNIT + '已经不存在了');
+
+    // 历史关用会话内的完成集；主线关用落盘的进度
+    let completed;
+    if (s.history) {
+      completed = lv.items.filter((w) => s.doneSet.has(S.idOf(w.en))).length;
+    } else {
+      const p = s.pid ? S.loadPlayer(s.pid) : { done: [] };
+      const done = new Set(p.done);
+      completed = lv.items.filter((w) => done.has(S.idOf(w.en))).length;
+    }
+
     const r = computeBigReward({ total: lv.items.length, completed, per: BIG_PER });
     sendJson(ctx.res, 200, {
       ok: true,
-      allCompleted: r.allCompleted,
-      bigReward: r.bigReward,
+      // 历史关是复习：不写进度，所以也不发整关奖励
+      saved: !s.history,
+      allCompleted: s.history ? false : r.allCompleted,
+      bigReward: s.history ? 0 : r.bigReward,
       totalUnits: lv.items.length,
       completedUnits: completed,
+      ...(s.history ? { note: '历史关是复习模式：不记录进度，也不发整关奖励' } : {}),
     });
   });
 
@@ -373,13 +434,44 @@ export function registerGame(router, kind) {
 
   /* ---------------------------- 整表对照 ---------------------------- */
   router.get(PREFIX + (isText ? '/sentences' : '/words'), (ctx) => {
-    const lv = currentLevel();
+    // 支持看历史关的整表：?mode=history&num=100001
+    const history = ctx.query.get('mode') === 'history';
+    const lv = history
+      ? (S.loadLevel(kind, Number(ctx.query.get('num'))) || null)
+      : currentLevel();
+    if (!lv) throw notFound('<no-history-level>', '没有这个历史关');
     sendJson(ctx.res, 200, {
       ok: true,
       num: lv.num,
       name: lv.name,
+      mode: history ? 'history' : 'sanj',
       total: lv.items.length,
       items: lv.items.map((w) => ({ [ID]: S.idOf(w.en), en: w.en, zh: w.zh || '' })),
+    });
+  });
+
+  /* ---------------------------- 历史关列表 ---------------------------- */
+  /**
+   * 历史关 = 除现役关（编号最大）以外的所有旧关。
+   * 上传新关时若沿用旧关号去覆盖，那一版就视为修订、不会进历史。
+   */
+  router.get(PREFIX + '/history', (ctx) => {
+    const list = S.listHistory(kind);
+    const cur = S.loadCurrent(kind);
+    sendJson(ctx.res, 200, {
+      ok: true,
+      current: cur ? { num: cur.num, name: cur.name, count: cur.items.length } : null,
+      count: list.length,
+      levels: list.map((x) => ({
+        num: x.num,
+        name: x.name,
+        count: x.count,
+        groups: Math.ceil(x.count / GROUP_SIZE),
+        updatedAt: x.updatedAt ? new Date(x.updatedAt).toISOString() : null,
+        // 历史关不存档：前端别显示"已完成"
+        saved: false,
+      })),
+      note: '历史关是复习模式：全部' + UNIT + '都参与、不跳过、不记录进度',
     });
   });
 

@@ -111,15 +111,22 @@ GET /api/wordgame/m/catalog
 {
   "ok": true,
   "deviceId": "my-phone-uuid",
-  "sanj": { "num": 100001, "name": "100001", "count": 10, "groups": 1,
+  "sanj": { "num": 100002, "name": "100002", "count": 10, "groups": 1,
             "completedCount": 0, "updatedAt": "2026-11-16T14:24:00.769Z" },
-  "text": { "num": 100001, "name": "100001", "count": 3, "groups": 1,
+  "text": { "num": 100002, "name": "100002", "count": 3, "groups": 1,
             "completedCount": 0, "updatedAt": "..." },
-  "caps": { "sanj": true, "text": true, "tts": {...}, "export": true, "upload": true }
+  "history": {
+    "sanj": [ { "num": 100001, "name": "100001", "count": 10, "groups": 1,
+                "updatedAt": "...", "saved": false } ],
+    "text": []
+  },
+  "caps": { "sanj": true, "text": true, "history": true,
+            "tts": {...}, "export": true, "upload": true }
 }
 ```
 
 `sanj` / `text` 为 `null` 表示这台私服还没上传对应的关卡。
+`history` 是**历史关列表**（见 §1.8），`saved: false` 表示这些关不记进度。
 
 ### 1.4 拉取一整关
 
@@ -129,13 +136,15 @@ GET /api/wordgame/text/m/level                # 三玖课文关（句）
 
 可选参数：
   format=json|txt    默认 json
+  scope=history      取历史关（此时必须带 num）
+  num=100001         scope=history 时要哪一关
   hash=<上次拿到的 hash>   内容没变则只回 { "unchanged": true }
 ```
 
 ```json
 {
   "ok": true, "scope": "sanj", "num": 100001, "name": "100001",
-  "count": 10, "hash": "4e09dc66e19b4d56", "groupSize": 10,
+  "count": 10, "hash": "4e09dc66e19b4d56", "groupSize": 10, "saved": true,
   "words": [
     { "wid": "vocabulary", "en": "vocabulary", "zh": "n. 词汇；词汇量",
       "index": 0, "wordCount": 1, "charCount": 10 }
@@ -144,6 +153,8 @@ GET /api/wordgame/text/m/level                # 三玖课文关（句）
 ```
 
 课文版把 `words` 换成 `sentences`，`wid` 换成 `sid`。
+
+`scope=history` 时 `scope` 回 `"history"`、`saved` 为 `false`。
 
 **`format=txt`** 返回 `text/plain`，每行 `英文<TAB>中文`，响应头带：
 
@@ -167,11 +178,55 @@ GET /api/wordgame/text/m/export
 
 ```json
 { "ok": true, "exportedAt": "...",
-  "sanj": { "num": 100001, "name": "100001", "count": 10, "hash": "...", "words": [ ... ] },
-  "text": { "num": 100001, "name": "100001", "count": 3,  "hash": "...", "sentences": [ ... ] } }
+  "sanj": { "num": 100002, "name": "100002", "count": 10, "hash": "...", "words": [ ... ] },
+  "text": { "num": 100002, "name": "100002", "count": 3,  "hash": "...", "sentences": [ ... ] },
+  "history": {
+    "sanj": [ { "num": 100001, "count": 10, "hash": "...", "saved": false, "words": [ ... ] } ],
+    "text": []
+  } }
 ```
 
+历史关默认**一并导出**，方便做离线包（想复习旧关就不必再发一次请求）。
+如果只想要现役关，客户端忽略 `history` 字段即可。
+
 限流 20 次/分钟（整包比单关大得多）。
+
+### 1.8 历史关列表
+
+```
+GET /api/wordgame/m/catalog     # 已含 history 字段，一般不用单独调
+GET /api/wordgame/history       # 网页端
+GET /api/wordgame/text/history  # 课文
+```
+
+```json
+{
+  "ok": true,
+  "current": { "num": 100002, "name": "100002", "count": 10 },
+  "count": 1,
+  "levels": [
+    { "num": 100001, "name": "100001", "count": 10, "groups": 1,
+      "updatedAt": "2026-11-16T14:24:00.769Z", "saved": false }
+  ],
+  "note": "历史关是复习模式：全部词都参与、不跳过、不记录进度"
+}
+```
+
+**历史关怎么来的**：上传新关时若没指定关号，会取"当前最大号 + 1"，旧文件原样留着；
+编号最大的那个是现役关，其余天然就是历史关。所以它不需要额外存储，也不会丢。
+
+**历史关的语义（与现役关的区别）**
+
+| | 现役关 | 历史关 |
+|---|---|---|
+| 参与题目 | 只考未完成的，不足 10 时借已完成题 | **全部题目，不跳过** |
+| 读写进度 | 是 | **否**（完成度只活在本次会话） |
+| 整关奖励 | 全部完成才发 | **不发** |
+| 借题 | 有 | 无 |
+
+> 为什么历史关完全不碰进度：它是"回头复习"，不是主线。若也读写那份完成记录，
+> 复习一遍就会把现役关的完成度搅乱（完成度是按题目 id 存的，跨关会串）。
+> 所以历史关的完成度只活在这次会话的内存里，退出即散。
 
 ### 1.6 语音
 
@@ -239,14 +294,15 @@ GET /api/wordgame/text/info
 ### 2.2 开一局
 
 ```
-GET /api/wordgame/level?study=1      # study=1 才下发英文
+GET /api/wordgame/level?study=1              # study=1 才下发英文
+GET /api/wordgame/level?mode=history&num=100001   # 复习某个历史关
 ```
 
 ```json
 {
   "ok": true, "sessionId": "s_xxx", "mode": "sanj",
   "levelNum": 100001, "levelName": "100001",
-  "totalUnits": 10, "completedUnits": 0, "groupSize": 10,
+  "totalUnits": 10, "completedUnits": 0, "groupSize": 10, "saved": true,
   "groups": [
     { "index": 0, "items": [
       { "wid": "vocabulary", "zh": "n. 词汇", "wordCount": 1, "charCount": 10,
@@ -256,6 +312,8 @@ GET /api/wordgame/level?study=1      # study=1 才下发英文
   ]
 }
 ```
+
+`mode` 取 `sanj` 或 `history`；`saved` 为 `false` 表示这一局不写进度（历史关）。
 
 > ⚠ **不带 `study` 时响应里绝不能有 `en`** —— 这是防作弊的硬约束。
 >
@@ -311,10 +369,11 @@ POST /api/wordgame/group/finish
 ```json
 { "ok": true, "score": 100, "fullMark": 100, "passed": true,
   "firstTryWords": ["vocabulary"], "secondTryWords": [],
-  "points": 2, "isLast": true }
+  "points": 2, "isLast": true, "saved": true }
 ```
 
 课文版字段名是 `firstTrySentences` / `secondTrySentences`。
+历史关的 `saved` 为 `false`。
 
 ### 2.5 整关结算
 
@@ -324,9 +383,13 @@ POST /api/wordgame/level/finish
 ```
 
 ```json
-{ "ok": true, "allCompleted": true, "bigReward": 1,
+{ "ok": true, "saved": true, "allCompleted": true, "bigReward": 1,
   "totalUnits": 10, "completedUnits": 10 }
 ```
+
+历史关：`saved:false`、`allCompleted:false`、`bigReward:0`，并附带
+`note: "历史关是复习模式：不记录进度，也不发整关奖励"` —
+`completedUnits` 仍然反映**本次复习**做了多少题。
 
 ### 2.6 补考（错超过一题的）
 
@@ -345,8 +408,10 @@ POST /api/wordgame/requiz
 
 ```
 POST /api/wordgame/reset          清空我的进度（需 X-Player-Id）
-GET  /api/wordgame/words          整关对照表
-GET  /api/wordgame/text/sentences 整篇对照表
+GET  /api/wordgame/words          整关对照表（?mode=history&num= 可看历史关）
+GET  /api/wordgame/text/sentences 整篇对照表（同上）
+GET  /api/wordgame/history        历史关列表
+GET  /api/wordgame/text/history   课文历史关列表
 GET  /api/wordgame/rules          规则常量
 GET  /api/keys/status             哪些密钥已配置（永不回显 key）
 ```
@@ -384,8 +449,11 @@ curl -X POST http://localhost:8787/api/wordgame/upload \
   "preview": [ { "en": "vocabulary", "zh": "n. 词汇" } ] }
 ```
 
-- `num` 留空则自动取"当前最大关号 + 1"
-- 上传会**替换现役关**，并清空该玩家的完成记录（否则新关会沿用旧关的完成度）
+- `num` 留空则自动取"当前最大关号 + 1"，新关即成为**现役关**
+- 指定 `num` 就是写那个号：
+  - 写的是**最大号** → 覆盖现役关（视为修订）
+  - 写的是**比最大号小**的号 → 这一版会成为**历史关**，现役关不变
+- 上传会**替换该关**并清空该玩家的完成记录（否则新关会沿用旧关的完成度）
 - `fillChinese: true` 时用大模型补全缺失的中文；**没配任何模型 key 就静默跳过**
 
 ### 文本格式

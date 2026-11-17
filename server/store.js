@@ -237,18 +237,43 @@ export function writeLevelFile(kind, num, list) {
   return p;
 }
 
-/** 当前关卡：取编号最大的那个（私服通常只留一个"现役关"） */
-export function loadCurrent(kind) {
-  const nums = listLevels(kind);
-  if (!nums.length) return null;
-  const num = nums[0];
-  const raw = readLevelFile(kind, num);
+/** 读一个指定编号的关卡；不存在/解析不出内容返回 null */
+export function loadLevel(kind, num) {
+  const n = Number(num);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const raw = readLevelFile(kind, n);
   if (raw == null) return null;
   const list = kind === 'text' ? parseText(raw) : parseWords(raw);
   if (!list.length) return null;
   let mtime = 0;
-  try { mtime = fs.statSync(levelPath(kind, num)).mtimeMs; } catch { /* 忽略 */ }
-  return { num, name: String(num), items: list, mtime };
+  try { mtime = fs.statSync(levelPath(kind, n)).mtimeMs; } catch { /* 忽略 */ }
+  return { num: n, name: String(n), items: list, mtime };
+}
+
+/** 当前关卡：取编号最大的那个（私服通常只留一个"现役关"） */
+export function loadCurrent(kind) {
+  const nums = listLevels(kind);
+  if (!nums.length) return null;
+  return loadLevel(kind, nums[0]);
+}
+
+/**
+ * 历史关：除"现役关"（编号最大的那个）以外的所有关卡。
+ *
+ * 【为什么历史关不需要单独一处存储】
+ *   上传时若没指定关号，会取"当前最大号 + 1"写入一个新文件，旧文件原样留着。
+ *   也就是说历史关**天然已经存在**，只是之前只暴露了编号最大的那一个。
+ *   所以这个功能不需要迁移、不占额外磁盘，只要把剩下的列出来。
+ *   同理，用户指定了已存在的关号去覆盖时，那一版就被覆盖了（视为修订）。
+ */
+export function listHistory(kind) {
+  const nums = listLevels(kind);
+  const out = [];
+  for (const n of nums.slice(1)) {
+    const lv = loadLevel(kind, n);
+    if (lv) out.push({ num: lv.num, name: lv.name, count: lv.items.length, updatedAt: lv.mtime });
+  }
+  return out;
 }
 
 export function nextLevelNum(kind) {
